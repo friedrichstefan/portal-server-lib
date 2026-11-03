@@ -9,22 +9,15 @@ import {
 import { mock } from 'jest-mock-extended';
 import { ApiException } from '@kubernetes/client-node/dist/gen/apis/exception.js';
 import { KcpKubernetesService } from '../kcp-k8s.service.js';
-import {
-  allowRuleToExpression,
-  ApiExportService,
-  expressionToAllowRule,
-  mapK8sError,
-  policyName,
-  validateAllowRules,
-  validateApiExportName,
-  validateClusterPath,
-} from './apiexport.service.js';
+import { ApiExportService } from './apiexport.service.js';
 import { WORKSPACE_POLICY_HOME, WORKSPACE_PROVIDERS } from './constants.js';
 
 jest.mock('@kubernetes/client-node', () => {
   class KubeConfig {
     loadFromFile = jest.fn();
-    getCurrentCluster = jest.fn().mockReturnValue({ server: 'https://kcp.example.com', name: 'test' });
+    getCurrentCluster = jest
+      .fn()
+      .mockReturnValue({ server: 'https://kcp.example.com', name: 'test' });
     makeApiClient = jest.fn();
     addUser = jest.fn();
     addContext = jest.fn();
@@ -38,6 +31,29 @@ jest.mock('@kubernetes/client-node', () => {
 jest.mock('@kubernetes/client-node/dist/gen/middleware.js', () => ({
   PromiseMiddlewareWrapper: jest.fn(),
 }));
+
+type TestableApiExportService = {
+  allowRuleToExpression: (rule: { path: string; includeDescendants: boolean }) => string;
+  expressionToAllowRule: (
+    expression: string,
+  ) => { path: string; includeDescendants: boolean } | null;
+  mapK8sError: (error: unknown, context: string, logger?: unknown) => never;
+  policyName: (exportName: string, clusterPath: string) => string;
+  validateAllowRules: (rules: { path: string; includeDescendants: boolean }[]) => void;
+  validateApiExportName: (name: string) => void;
+  validateClusterPath: (clusterPath: string) => void;
+};
+
+const utilityService = new ApiExportService(
+  mock<KcpKubernetesService>(),
+) as unknown as TestableApiExportService;
+const allowRuleToExpression = utilityService.allowRuleToExpression.bind(utilityService);
+const expressionToAllowRule = utilityService.expressionToAllowRule.bind(utilityService);
+const mapK8sError = utilityService.mapK8sError.bind(utilityService);
+const policyName = utilityService.policyName.bind(utilityService);
+const validateAllowRules = utilityService.validateAllowRules.bind(utilityService);
+const validateApiExportName = utilityService.validateApiExportName.bind(utilityService);
+const validateClusterPath = utilityService.validateClusterPath.bind(utilityService);
 
 /** Create a real ApiException with the given HTTP status code (2.x shape) */
 function makeApiException(code: number): ApiException<unknown> {
@@ -60,7 +76,12 @@ function makeExport(name: string, clusterPath = PROVIDER_WS) {
   };
 }
 
-function makePolicy(exportName: string, clusterPath: string, expressions: string[], resourceVersion = '1') {
+function makePolicy(
+  exportName: string,
+  clusterPath: string,
+  expressions: string[],
+  resourceVersion = '1',
+) {
   return {
     apiVersion: 'core.platform-mesh.io/v1alpha1',
     kind: 'APIExportPolicy',
@@ -72,28 +93,46 @@ function makePolicy(exportName: string, clusterPath: string, expressions: string
 describe('utility functions', () => {
   describe('allowRuleToExpression', () => {
     it('converts exact path', () => {
-      expect(allowRuleToExpression({ path: 'root:orgs:demo', includeDescendants: false })).toBe(':root:orgs:demo');
+      expect(allowRuleToExpression({ path: 'root:orgs:demo', includeDescendants: false })).toBe(
+        ':root:orgs:demo',
+      );
     });
     it('converts descendants path', () => {
-      expect(allowRuleToExpression({ path: 'root:orgs:demo', includeDescendants: true })).toBe(':root:orgs:demo:*');
+      expect(allowRuleToExpression({ path: 'root:orgs:demo', includeDescendants: true })).toBe(
+        ':root:orgs:demo:*',
+      );
     });
     it('converts all-orgs wildcard', () => {
-      expect(allowRuleToExpression({ path: 'root:orgs', includeDescendants: true })).toBe(':root:orgs:*');
+      expect(allowRuleToExpression({ path: 'root:orgs', includeDescendants: true })).toBe(
+        ':root:orgs:*',
+      );
     });
   });
 
   describe('expressionToAllowRule', () => {
     it('parses exact expression', () => {
-      expect(expressionToAllowRule(':root:orgs:demo')).toEqual({ path: 'root:orgs:demo', includeDescendants: false });
+      expect(expressionToAllowRule(':root:orgs:demo')).toEqual({
+        path: 'root:orgs:demo',
+        includeDescendants: false,
+      });
     });
     it('parses descendants expression', () => {
-      expect(expressionToAllowRule(':root:orgs:demo:*')).toEqual({ path: 'root:orgs:demo', includeDescendants: true });
+      expect(expressionToAllowRule(':root:orgs:demo:*')).toEqual({
+        path: 'root:orgs:demo',
+        includeDescendants: true,
+      });
     });
     it('parses all-orgs expression', () => {
-      expect(expressionToAllowRule(':root:orgs:*')).toEqual({ path: 'root:orgs', includeDescendants: true });
+      expect(expressionToAllowRule(':root:orgs:*')).toEqual({
+        path: 'root:orgs',
+        includeDescendants: true,
+      });
     });
     it('returns null for invalid expression', () => {
       expect(expressionToAllowRule(':root:providers:x')).toBeNull();
+    });
+    it('returns null for a path that only shares the orgs prefix', () => {
+      expect(expressionToAllowRule(':root:orgsxy:a')).toBeNull();
     });
   });
 
@@ -161,44 +200,69 @@ describe('utility functions', () => {
       expect(() => validateAllowRules([])).not.toThrow();
     });
     it('accepts valid exact rule', () => {
-      expect(() => validateAllowRules([{ path: 'root:orgs:demo', includeDescendants: false }])).not.toThrow();
+      expect(() =>
+        validateAllowRules([{ path: 'root:orgs:demo', includeDescendants: false }]),
+      ).not.toThrow();
     });
     it('accepts valid descendants rule', () => {
-      expect(() => validateAllowRules([{ path: 'root:orgs:demo', includeDescendants: true }])).not.toThrow();
+      expect(() =>
+        validateAllowRules([{ path: 'root:orgs:demo', includeDescendants: true }]),
+      ).not.toThrow();
     });
     it('accepts all-orgs rule', () => {
-      expect(() => validateAllowRules([{ path: 'root:orgs', includeDescendants: true }])).not.toThrow();
+      expect(() =>
+        validateAllowRules([{ path: 'root:orgs', includeDescendants: true }]),
+      ).not.toThrow();
     });
     it('rejects non-array', () => {
       expect(() => validateAllowRules(null as any)).toThrow(BadRequestException);
     });
     it('rejects rule with non-string path', () => {
-      expect(() => validateAllowRules([{ path: 123 as any, includeDescendants: false }])).toThrow(BadRequestException);
+      expect(() => validateAllowRules([{ path: 123 as any, includeDescendants: false }])).toThrow(
+        BadRequestException,
+      );
     });
     it('rejects rule with non-boolean includeDescendants', () => {
-      expect(() => validateAllowRules([{ path: 'root:orgs:demo', includeDescendants: 'yes' as any }])).toThrow(BadRequestException);
+      expect(() =>
+        validateAllowRules([{ path: 'root:orgs:demo', includeDescendants: 'yes' as any }]),
+      ).toThrow(BadRequestException);
     });
     it('rejects invalid all-orgs exact', () => {
-      expect(() => validateAllowRules([{ path: 'root:orgs', includeDescendants: false }])).toThrow(BadRequestException);
+      expect(() => validateAllowRules([{ path: 'root:orgs', includeDescendants: false }])).toThrow(
+        BadRequestException,
+      );
     });
     it('rejects path with trailing colon (empty segment)', () => {
-      expect(() => validateAllowRules([{ path: 'root:orgs:', includeDescendants: false }])).toThrow(BadRequestException);
+      expect(() => validateAllowRules([{ path: 'root:orgs:', includeDescendants: false }])).toThrow(
+        BadRequestException,
+      );
     });
     it('rejects wildcard in path string (caught by segment validation)', () => {
-      expect(() => validateAllowRules([{ path: 'root:orgs:demo:*', includeDescendants: false }])).toThrow(BadRequestException);
+      expect(() =>
+        validateAllowRules([{ path: 'root:orgs:demo:*', includeDescendants: false }]),
+      ).toThrow(BadRequestException);
     });
     it('rejects non-orgs prefix', () => {
-      expect(() => validateAllowRules([{ path: 'root:providers:x', includeDescendants: false }])).toThrow(BadRequestException);
+      expect(() =>
+        validateAllowRules([{ path: 'root:providers:x', includeDescendants: false }]),
+      ).toThrow(BadRequestException);
+    });
+    it('rejects a path that only shares the orgs prefix', () => {
+      expect(() =>
+        validateAllowRules([{ path: 'root:orgsxy:a', includeDescendants: false }]),
+      ).toThrow(BadRequestException);
     });
     it('rejects duplicate rules', () => {
       const rule = { path: 'root:orgs:demo', includeDescendants: false };
       expect(() => validateAllowRules([rule, rule])).toThrow(BadRequestException);
     });
     it('rejects multiple rules where one is invalid', () => {
-      expect(() => validateAllowRules([
-        { path: 'root:orgs:demo', includeDescendants: false },
-        { path: 'root:orgs', includeDescendants: false },
-      ])).toThrow(BadRequestException);
+      expect(() =>
+        validateAllowRules([
+          { path: 'root:orgs:demo', includeDescendants: false },
+          { path: 'root:orgs', includeDescendants: false },
+        ]),
+      ).toThrow(BadRequestException);
     });
   });
 
@@ -218,10 +282,14 @@ describe('utility functions', () => {
       expect(() => mapK8sError(makeApiException(403), 'ctx', logger)).toThrow(ForbiddenException);
     });
     it('maps ApiException code 422 to UnprocessableEntityException', () => {
-      expect(() => mapK8sError(makeApiException(422), 'ctx', logger)).toThrow(UnprocessableEntityException);
+      expect(() => mapK8sError(makeApiException(422), 'ctx', logger)).toThrow(
+        UnprocessableEntityException,
+      );
     });
     it('maps unknown error to InternalServerErrorException', () => {
-      expect(() => mapK8sError(new Error('oops'), 'ctx', logger)).toThrow(InternalServerErrorException);
+      expect(() => mapK8sError(new Error('oops'), 'ctx', logger)).toThrow(
+        InternalServerErrorException,
+      );
     });
   });
 });
@@ -271,7 +339,9 @@ describe('ApiExportService', () => {
 
       expect(result).toHaveLength(2);
       const httpbinExport = result.find((e) => e.clusterPath === PROVIDER_WS)!;
-      expect(httpbinExport.allowRules).toEqual([{ path: 'root:orgs:demo', includeDescendants: false }]);
+      expect(httpbinExport.allowRules).toEqual([
+        { path: 'root:orgs:demo', includeDescendants: false },
+      ]);
       const kroExport = result.find((e) => e.clusterPath === ws2)!;
       expect(kroExport.allowRules).toEqual([{ path: 'root:orgs', includeDescendants: true }]);
     });
@@ -346,7 +416,11 @@ describe('ApiExportService', () => {
         .mockResolvedValueOnce({ items: [makeExport('alpha')] })
         .mockResolvedValueOnce({
           items: [
-            makePolicy('alpha', PROVIDER_WS, [':root:orgs:demo:*', ':root:orgs:*', ':root:orgs:prod']),
+            makePolicy('alpha', PROVIDER_WS, [
+              ':root:orgs:demo:*',
+              ':root:orgs:*',
+              ':root:orgs:prod',
+            ]),
           ],
         });
 
@@ -388,7 +462,10 @@ describe('ApiExportService', () => {
       (kcpK8s.getClusterCustomObject as jest.Mock).mockRejectedValueOnce(makeApiException(404));
 
       await expect(
-        service.setApiExportPolicy('no-exist', { clusterPath: PROVIDER_WS, allowRules: validRules }),
+        service.setApiExportPolicy('no-exist', {
+          clusterPath: PROVIDER_WS,
+          allowRules: validRules,
+        }),
       ).rejects.toThrow(NotFoundException);
     });
 
@@ -398,7 +475,10 @@ describe('ApiExportService', () => {
         .mockRejectedValueOnce(makeApiException(404)); // policy does not exist
       (kcpK8s.createClusterCustomObject as jest.Mock).mockResolvedValueOnce({});
 
-      await service.setApiExportPolicy('alpha', { clusterPath: PROVIDER_WS, allowRules: validRules });
+      await service.setApiExportPolicy('alpha', {
+        clusterPath: PROVIDER_WS,
+        allowRules: validRules,
+      });
 
       expect(kcpK8s.createClusterCustomObject).toHaveBeenCalledWith(
         expect.objectContaining({ plural: 'apiexportpolicies' }),
@@ -420,7 +500,10 @@ describe('ApiExportService', () => {
         .mockResolvedValueOnce(existingPolicy);
       (kcpK8s.replaceClusterCustomObject as jest.Mock).mockResolvedValueOnce({});
 
-      await service.setApiExportPolicy('alpha', { clusterPath: PROVIDER_WS, allowRules: validRules });
+      await service.setApiExportPolicy('alpha', {
+        clusterPath: PROVIDER_WS,
+        allowRules: validRules,
+      });
 
       expect(kcpK8s.replaceClusterCustomObject).toHaveBeenCalledWith(
         expect.objectContaining({ plural: 'apiexportpolicies' }),
@@ -476,7 +559,10 @@ describe('ApiExportService', () => {
       (kcpK8s.createClusterCustomObject as jest.Mock).mockRejectedValueOnce(makeApiException(409));
       (kcpK8s.replaceClusterCustomObject as jest.Mock).mockResolvedValueOnce({});
 
-      await service.setApiExportPolicy('alpha', { clusterPath: PROVIDER_WS, allowRules: validRules });
+      await service.setApiExportPolicy('alpha', {
+        clusterPath: PROVIDER_WS,
+        allowRules: validRules,
+      });
 
       expect(kcpK8s.replaceClusterCustomObject).toHaveBeenCalledWith(
         expect.objectContaining({ plural: 'apiexportpolicies' }),
@@ -529,7 +615,10 @@ describe('ApiExportService', () => {
         .mockResolvedValueOnce(existingPolicy);
       (kcpK8s.replaceClusterCustomObject as jest.Mock).mockResolvedValueOnce({});
 
-      await service.setApiExportPolicy('alpha', { clusterPath: PROVIDER_WS, allowRules: validRules });
+      await service.setApiExportPolicy('alpha', {
+        clusterPath: PROVIDER_WS,
+        allowRules: validRules,
+      });
 
       const replacedBody = (kcpK8s.replaceClusterCustomObject as jest.Mock).mock.calls[0][3];
       expect(replacedBody).not.toHaveProperty('status');
